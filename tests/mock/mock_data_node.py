@@ -14,7 +14,8 @@ from collections import deque
 from src.framework import Node
 from src.scope import (
     StartSamplingRequest, StopSamplingRequest, ChangeSampleRateRequest,
-    SelectVariableRequest, VariableWriteRequest, SampleData, SamplingStatus,
+    SelectVariableRequest, VariableWriteRequest, PauseMcuRequest,
+    ResumeMcuRequest, ResetSamplingRequest, SampleData, SamplingStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,8 @@ class MockDataNode(Node):
     def __init__(self, name: str = "MockDataNode"):
         super().__init__(name)
         self._running = False
+        self._paused = False
+        self._pause_start = 0.0
         self._expressions: list[str] = []
         self._selected: set[str] = set()  # 前端通过勾选发送的选中列表
         self._sample_rate = 100
@@ -59,6 +62,9 @@ class MockDataNode(Node):
         self.subscribe(ChangeSampleRateRequest, self._on_change_rate)
         self.subscribe(SelectVariableRequest, self._on_select)
         self.subscribe(VariableWriteRequest, self._on_write)
+        self.subscribe(PauseMcuRequest, self._on_pause)
+        self.subscribe(ResumeMcuRequest, self._on_resume)
+        self.subscribe(ResetSamplingRequest, self._on_reset_sampling)
 
     def _on_select(self, event: SelectVariableRequest):
         """处理前端发来的勾选/取消事件，动态维护选中列表。
@@ -88,14 +94,13 @@ class MockDataNode(Node):
             return
 
         self._sample_rate = event.sample_rate_hz or 100
-        self._sample_count = 0
-        self._t0 = 0.0
-        self._phase = 0.0
-        self._latest_values.clear()
+        # 恢复采样时：保留 _t0 / _sample_count / _phase / _latest_values
+        # 让时间戳自然延续；仅首次启动时由 _process 初始化 _t0
         self._running = True
+        self._paused = False  # 每次启动采样时 MCU 默认为运行状态
 
         self.publish(SamplingStatus(
-            is_running=True, sample_count=0, actual_rate=0.0
+            is_running=True, sample_count=0, actual_rate=0.0, paused=False,
         ))
         logger.info(f"[MockDataNode] 开始模拟采样: {len(self._expressions)} 变量, "
                      f"{self._sample_rate} Hz")
@@ -104,9 +109,10 @@ class MockDataNode(Node):
         if not self._running:
             return
         self._running = False
+        # 不重置 _paused：停止采样不影响 MCU 暂停状态
         self.publish(SamplingStatus(
             is_running=False, sample_count=self._sample_count,
-            actual_rate=self._actual_rate,
+            actual_rate=self._actual_rate, paused=self._paused,
         ))
         logger.info(f"[MockDataNode] 停止采样: {self._sample_count} 样本")
 
@@ -156,9 +162,48 @@ class MockDataNode(Node):
             self._overrides[dep_expr] = computed
             logger.info(f"  ↳ 级联更新 {dep_expr} = {computed:.4g}")
 
+    def _on_pause(self, event: PauseMcuRequest):
+        """暂停 MCU 运行：记录暂停时刻，停止生成样本。"""
+        if self._paused:
+            return
+        self._paused = True
+        self._pause_start = time.perf_counter()
+        self.publish(SamplingStatus(
+            is_running=self._running, sample_count=self._sample_count,
+            actual_rate=self._actual_rate, paused=True,
+        ))
+        logger.info("[MockDataNode] MCU 暂停")
+
+    def _on_resume(self, event: ResumeMcuRequest):
+        """恢复 MCU 运行：调整 _t0 补偿暂停时间，继续采样。"""
+        if not self._paused:
+            return
+        pause_duration = time.perf_counter() - self._pause_start
+        self._t0 += pause_duration  # 补偿暂停时间，时间连续
+        self._paused = False
+        self.publish(SamplingStatus(
+            is_running=self._running, sample_count=self._sample_count,
+            actual_rate=self._actual_rate, paused=False,
+        ))
+        logger.info(f"[MockDataNode] MCU 恢复 (暂停 {pause_duration:.2f}s)")
+
+    def _on_reset_sampling(self, event: ResetSamplingRequest):
+        """全量复位：清空所有内部计数器和相位。"""
+        self._running = False
+        self._paused = False
+        self._sample_count = 0
+        self._t0 = 0.0
+        self._phase = 0.0
+        self._latest_values.clear()
+        self._actual_rate = 0.0
+        logger.info("[MockDataNode] 全量复位")
+
     async def _process(self):
-        """每帧生成采样数据，每采到一个样本立即发布。"""
-        if not self._running:
+        """每帧生成采样数据，每采到一个样本立即发布。
+
+        MCU 暂停时 (_paused=True) 直接返回，不生成任何样本。
+        """
+        if not self._running or self._paused:
             return
 
         now = time.perf_counter()
@@ -173,8 +218,13 @@ class MockDataNode(Node):
         if to_generate <= 0:
             return
 
+        # 限制每帧最多生成 1 个样本，避免突发大量发布阻塞 UI 刷新
+        to_generate = min(to_generate, 1)
+
         for _ in range(to_generate):
-            t = (self._sample_count + 1) / self._sample_rate
+            # 使用实际流逝时间作为时间戳，而非 sample_count 推导
+            # 这样停止后恢复采样时时间戳能正确跳跃到当前时刻
+            t = elapsed
             self._phase += 0.05
 
             # 生成一个独立变量样本
@@ -211,7 +261,7 @@ class MockDataNode(Node):
                 timestamps=[t],
             ))
 
-        # 更新实际速率
+        # 更新实际速率（仅当 running 且不 paused）
         if elapsed > 0:
             self._actual_rate = self._sample_count / elapsed
 

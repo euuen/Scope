@@ -22,7 +22,7 @@ from .events import (
     ImportElfRequest, ScanProbesRequest, ConnectProbeRequest,
     DisconnectProbeRequest, SelectVariableRequest,
     StartSamplingRequest, ChangeSampleRateRequest, StopSamplingRequest,
-    VariableWriteRequest,
+    VariableWriteRequest, PauseMcuRequest, ResumeMcuRequest, ResetSamplingRequest,
     ElfLoaded, ElfLoadFailed, ProbeScanResult,
     ProbeConnected, ProbeDisconnected, ProbeConnectionFailed,
     SampleData, SamplingStatus,
@@ -84,6 +84,7 @@ class ScopeMainWindow(QMainWindow):
         self._probes: list[dict] = []
         self._is_connected = False
         self._sampling_active = False
+        self._mcu_paused = False
         self._sample_rate = 100
         self._frame_rate = DEFAULT_FRAME_RATE
         self._auto_scroll = True
@@ -169,7 +170,7 @@ class ScopeMainWindow(QMainWindow):
         from PySide6.QtGui import QShortcut, QKeySequence
         QShortcut(QKeySequence("Ctrl+E"), self).activated.connect(self._on_import_elf)
         QShortcut(QKeySequence("F5"), self).activated.connect(self._on_connect)
-        QShortcut(QKeySequence("Space"), self).activated.connect(self._on_start_stop)
+        QShortcut(QKeySequence("Space"), self).activated.connect(self._on_sampling_clicked)
 
     # ═══════════════════════════════════════════════════════════════
     # 状态栏
@@ -238,6 +239,20 @@ class ScopeMainWindow(QMainWindow):
         self._swd_speed_selector.addItems(["1 MHz", "4 MHz", "10 MHz"])
         self._swd_speed_selector.setCurrentIndex(1)
         layout.addWidget(self._swd_speed_selector)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.VLine)
+        separator.setFixedWidth(1)
+        layout.addWidget(separator)
+
+        layout.addWidget(QLabel("目标:"))
+        self._target_input = QLineEdit()
+        self._target_input.setText("stm32f407ig")
+        self._target_input.setFixedWidth(130)
+        self._target_input.setToolTip(
+            "强制指定目标芯片型号，如 stm32f407ig。留空则由 pyOCD 自动识别。"
+        )
+        layout.addWidget(self._target_input)
 
         separator = QFrame()
         separator.setFrameShape(QFrame.VLine)
@@ -523,10 +538,26 @@ class ScopeMainWindow(QMainWindow):
 
         layout.addStretch()
 
-        self._start_btn = QPushButton("  开始")
-        self._start_btn.setObjectName("startBtn")
-        self._start_btn.clicked.connect(self._on_start_stop)
-        layout.addWidget(self._start_btn)
+        self._sampling_btn = QPushButton("开始采样")
+        self._sampling_btn.setObjectName("startBtn")
+        self._sampling_btn.clicked.connect(self._on_sampling_clicked)
+        layout.addWidget(self._sampling_btn)
+
+        self._mcu_btn = QPushButton("暂停运行")
+        self._mcu_btn.setObjectName("mcuRunBtn")
+        self._mcu_btn.clicked.connect(self._on_mcu_clicked)
+        self._mcu_btn.setEnabled(False)
+        layout.addWidget(self._mcu_btn)
+
+        self._clear_points_btn = QPushButton("清除点")
+        self._clear_points_btn.setObjectName("clearPointsBtn")
+        self._clear_points_btn.clicked.connect(self._on_clear_points)
+        layout.addWidget(self._clear_points_btn)
+
+        self._reset_btn = QPushButton("复位")
+        self._reset_btn.setObjectName("resetBtn")
+        self._reset_btn.clicked.connect(self._on_reset)
+        layout.addWidget(self._reset_btn)
 
         self._export_btn = QPushButton("导出 CSV")
         self._export_btn.setObjectName("exportBtn")
@@ -576,9 +607,11 @@ class ScopeMainWindow(QMainWindow):
         mode = "reset" if "复位" in self._mode_selector.currentText() else "attach"
         freq_text = self._swd_speed_selector.currentText()
         freq = int(freq_text.split()[0]) * 1_000_000
+        target_override = self._target_input.text().strip()
         self._publish(
             ConnectProbeRequest(
-                probe_index=probe_idx, mode=mode, swd_freq_hz=freq
+                probe_index=probe_idx, mode=mode, swd_freq_hz=freq,
+                target_override=target_override,
             )
         )
 
@@ -592,21 +625,119 @@ class ScopeMainWindow(QMainWindow):
             rate = 1000
         self._publish(ChangeSampleRateRequest(sample_rate_hz=rate))
 
-    def _on_start_stop(self):
+    def _on_sampling_clicked(self):
+        """采样按钮：开始采样 / 停止采样 / 恢复采样。
+
+        按钮文字由 _on_sampling_status 维护，依据文本区分行为：
+          - 「停止采样」→ 暂停采集，保留缓冲区
+          - 「恢复采样」→ 从当前时刻继续，保留旧数据
+          - 「开始采样」→ 清空所有旧数据后全新启动
+        """
+        btn_text = self._sampling_btn.text()
+
+        if btn_text == "停止采样":
+            # 采样中 → 暂停
+            self._publish(StopSamplingRequest())
+            self._auto_scroll = False
+            return
+
+        if not self._monitored_vars:
+            QMessageBox.warning(self, "提示", "请先在左侧选择要监控的变量。")
+            return
+
+        rate = self._sample_rate_selector.currentData()
+        if rate == 0:
+            rate = 1000
+
+        if btn_text == "开始采样":
+            # 开始采样(全新)：清空后端 + 前端再启动
+            self._publish(ResetSamplingRequest())
+            self._sample_buffers.clear()
+            self._plot_curves.clear()
+            self._plot_view.clear()
+            legend = self._plot_view.addLegend()
+            if legend:
+                legend.setBrush(pg.mkBrush(30, 30, 45, 200))
+                legend.setPen(pg.mkPen(color=(80, 80, 100), width=1))
+
+        # btn_text == "恢复采样" or "开始采样" → 启动/恢复
+        self._publish(StartSamplingRequest(sample_rate_hz=rate))
+        self._auto_scroll = True
+
+    def _on_mcu_clicked(self):
+        """「暂停运行」/「恢复运行」按钮。
+
+        暂停：冻结 MCU 时间（时间刻度暂停），波形图停止滚动。
+        恢复：MCU 时间从暂停点继续，波形图继续滚动。
+        """
+        if self._mcu_paused:
+            self._publish(ResumeMcuRequest())
+        else:
+            self._publish(PauseMcuRequest())
+
+    def _on_reset(self):
+        """复位按钮：清空所有数据。
+
+        如果在采样状态下点击，清空后自动重新开始采样。
+        """
+        was_sampling = self._sampling_active
+
         if self._sampling_active:
             self._publish(StopSamplingRequest())
-        else:
-            if not self._monitored_vars:
-                QMessageBox.warning(self, "提示", "请先在左侧选择要监控的变量。")
-                return
-            rate = self._sample_rate_selector.currentData()
-            if rate == 0:
-                rate = 1000
-            self._publish(
-                StartSamplingRequest(
-                    sample_rate_hz=rate,
-                )
-            )
+
+        self._publish(ResetSamplingRequest())
+
+        self._sample_buffers.clear()
+        self._plot_curves.clear()
+        self._plot_view.clear()
+
+        legend = self._plot_view.addLegend()
+        if legend:
+            legend.setBrush(pg.mkBrush(30, 30, 45, 200))
+            legend.setPen(pg.mkPen(color=(80, 80, 100), width=1))
+
+        self._sampling_active = False
+        self._mcu_paused = False
+        self._actual_sample_rate = 0
+
+        self._sampling_btn.setText("开始采样")
+        self._sampling_btn.setObjectName("startBtn")
+        self._sampling_btn.style().unpolish(self._sampling_btn)
+        self._sampling_btn.style().polish(self._sampling_btn)
+        self._mcu_btn.setEnabled(False)
+        self._mcu_btn.setText("暂停运行")
+        self._mcu_btn.setObjectName("mcuRunBtn")
+
+        self._status_rate.setText("  |  —")
+        self._status_info.setText("  已复位")
+
+        # 复位前在采样中 → 自动重新开始采样
+        if was_sampling and self._monitored_vars:
+            QTimer.singleShot(50, self._on_sampling_clicked)
+
+    def _on_clear_points(self):
+        """清除已采集的数据点，不停止采样。
+
+        采样中时清空缓冲区，新数据继续流动并自动重建曲线。
+        暂停时仅清空缓冲区，按钮变为「开始采样」。
+        """
+        self._sample_buffers.clear()
+        self._plot_curves.clear()
+        self._plot_view.clear()
+
+        legend = self._plot_view.addLegend()
+        if legend:
+            legend.setBrush(pg.mkBrush(30, 30, 45, 200))
+            legend.setPen(pg.mkPen(color=(80, 80, 100), width=1))
+
+        # 如果暂停中且无数据了，按钮切回「开始采样」
+        if not self._sampling_active and not self._sample_buffers:
+            self._sampling_btn.setText("开始采样")
+            self._sampling_btn.setObjectName("startBtn")
+            self._sampling_btn.style().unpolish(self._sampling_btn)
+            self._sampling_btn.style().polish(self._sampling_btn)
+
+        self._status_info.setText("  已清除数据点")
 
     def _on_export(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -674,8 +805,10 @@ class ScopeMainWindow(QMainWindow):
         else:
             for p in self._probes:
                 uid = (p.get("uid") or "????")[:8]
+                name = p.get("name") or "Unknown"
+                vendor = p.get("vendor") or ""
                 self._probe_selector.addItem(
-                    f"{p['name']} ({p.get('vendor', '')}) [{uid}]"
+                    f"{name} ({vendor}) [{uid}]"
                 )
             self._conn_status_label.setText(
                 f"找到 {len(self._probes)} 个探针"
@@ -697,6 +830,11 @@ class ScopeMainWindow(QMainWindow):
         self._status_info.setText(
             f"  探针: {event.probe_name}  |  目标: {event.target_name}"
         )
+        # 连接后重置为「开始采样」状态
+        self._sampling_btn.setText("开始采样")
+        self._sampling_btn.setObjectName("startBtn")
+        self._sampling_btn.style().unpolish(self._sampling_btn)
+        self._sampling_btn.style().polish(self._sampling_btn)
 
     def _on_probe_disconnected(self, event: ProbeDisconnected):
         self._is_connected = False
@@ -709,6 +847,19 @@ class ScopeMainWindow(QMainWindow):
         self._connect_btn.style().polish(self._connect_btn)
         self._status_led.setStyleSheet("color: #e04040; font-size: 14px;")
         self._status_info.setText("  探针: 未连接  |  目标: --")
+
+        # 断开探针时同时停止采样，重置采样按钮状态
+        if self._sampling_active:
+            self._publish(StopSamplingRequest())
+            self._sampling_active = False
+        self._mcu_paused = False
+        self._sampling_btn.setText("开始采样")
+        self._sampling_btn.setObjectName("startBtn")
+        self._sampling_btn.style().unpolish(self._sampling_btn)
+        self._sampling_btn.style().polish(self._sampling_btn)
+        self._mcu_btn.setText("暂停运行")
+        self._mcu_btn.setObjectName("mcuRunBtn")
+        self._mcu_btn.setEnabled(False)
 
     def _on_probe_connection_failed(self, event: ProbeConnectionFailed):
         self._scan_btn.setEnabled(True)
@@ -751,43 +902,68 @@ class ScopeMainWindow(QMainWindow):
                 )
                 self._plot_curves[path] = curve
 
+            # 后端发一个点就立即画一个点——不等待定时器批量重绘
+            curve = self._plot_curves[path]
+            ts, vs = self._sample_buffers[path]
+            curve.setData(ts, vs)
+
         # 从 SamplingStatus 中获取实际采样率
         self._actual_sample_rate = getattr(self, '_actual_sample_rate', 0)
 
     def _on_sampling_status(self, event: SamplingStatus):
         self._sampling_active = event.is_running
+        self._mcu_paused = event.paused
+
         if event.is_running:
-            self._plot_view.clear()
-            legend = self._plot_view.addLegend()
-            if legend:
-                legend.setBrush(pg.mkBrush(30, 30, 45, 200))
-                legend.setPen(pg.mkPen(color=(80, 80, 100), width=1))
-            self._plot_curves.clear()
-            for i, name in enumerate(sorted(self._monitored_vars)):
-                color = COLORS[i % len(COLORS)]
-                curve = self._plot_view.plot(
-                    [],
-                    [],
-                    pen=pg.mkPen(color=color, width=1.5),
-                    name=name,
-                    connect='finite',
-                    autoDownsample=True,
-                    clipToView=True,
-                )
-                self._plot_curves[name] = curve
-            self._auto_scroll = True
-            self._y_auto_btn.setChecked(True)
-            self._start_btn.setText("  停止")
-            self._start_btn.setObjectName("stopBtn")
-            # 保存最新的实际采样率用于状态栏显示
+            # 只对初次采样（无现有曲线时）才创建曲线
+            if not self._plot_curves:
+                self._plot_view.clear()
+                legend = self._plot_view.addLegend()
+                if legend:
+                    legend.setBrush(pg.mkBrush(30, 30, 45, 200))
+                    legend.setPen(pg.mkPen(color=(80, 80, 100), width=1))
+                for i, name in enumerate(sorted(self._monitored_vars)):
+                    color = COLORS[i % len(COLORS)]
+                    curve = self._plot_view.plot(
+                        [], [],
+                        pen=pg.mkPen(color=color, width=1.5),
+                        name=name,
+                        connect='finite',
+                        autoDownsample=True,
+                        clipToView=True,
+                    )
+                    self._plot_curves[name] = curve
+
+            self._sampling_btn.setText("停止采样")
+            self._sampling_btn.setObjectName("stopBtn")
+            self._mcu_btn.setEnabled(True)
             self._actual_sample_rate = event.actual_rate
+
+            # 根据 paused 状态更新 MCU 按钮并控制滚动
+            if event.paused:
+                self._mcu_btn.setText("恢复运行")
+                self._mcu_btn.setObjectName("mcuResumeBtn")
+                self._auto_scroll = False
+            else:
+                self._mcu_btn.setText("暂停运行")
+                self._mcu_btn.setObjectName("mcuRunBtn")
+                self._auto_scroll = True
         else:
-            self._start_btn.setText("  开始")
-            self._start_btn.setObjectName("startBtn")
-            self._plot_curves.clear()
-            self._sample_buffers.clear()
-        self._start_btn.style().unpolish(self._start_btn)
-        self._start_btn.style().polish(self._start_btn)
+            # 有缓冲区数据 → 可恢复采样；无数据 → 全新开始
+            if self._sample_buffers:
+                self._sampling_btn.setText("恢复采样")
+                self._sampling_btn.setObjectName("resumeBtn")
+            else:
+                self._sampling_btn.setText("开始采样")
+                self._sampling_btn.setObjectName("startBtn")
+            self._mcu_btn.setEnabled(False)
+            self._mcu_btn.setText("暂停运行")
+            self._mcu_btn.setObjectName("mcuRunBtn")
+
+        self._sampling_btn.style().unpolish(self._sampling_btn)
+        self._sampling_btn.style().polish(self._sampling_btn)
+        self._mcu_btn.style().unpolish(self._mcu_btn)
+        self._mcu_btn.style().polish(self._mcu_btn)
 
     # ═══════════════════════════════════════════════════════════════
     # 变量树
@@ -1237,6 +1413,9 @@ class ScopeMainWindow(QMainWindow):
     # ═══════════════════════════════════════════════════════════════
 
     def _update_plot(self):
+        """定时器回调：仅处理可视性、时间轴滚动和状态栏。
+        曲线数据由 _on_sample_data 在收到每个样本时立即更新。
+        """
         if not self._sample_buffers:
             return
 
@@ -1246,10 +1425,10 @@ class ScopeMainWindow(QMainWindow):
         for name, curve in self._plot_curves.items():
             visible = name in self._visible_vars
             curve.setVisible(visible)
+            # 不再在此处调用 curve.setData()——已在 _on_sample_data 中即时完成
             if visible and name in self._sample_buffers:
-                timestamps, values = self._sample_buffers[name]
-                if len(timestamps) > 0:
-                    curve.setData(timestamps, values)
+                timestamps = self._sample_buffers[name][0]
+                if timestamps:
                     if timestamps[-1] > latest_timestamp:
                         latest_timestamp = timestamps[-1]
 
@@ -1261,10 +1440,11 @@ class ScopeMainWindow(QMainWindow):
             )
 
         scroll_mark = "" if self._auto_scroll else " (暂停)"
+        mcu_mark = " MCU暂停" if self._mcu_paused else ""
         self._status_rate.setText(
             f"  |  采样: {self._actual_sample_rate:.0f} Hz"
             f"  |  显示: {self._frame_rate} FPS"
-            f"  |  窗口: {time_window}s{scroll_mark}"
+            f"  |  窗口: {time_window}s{scroll_mark}{mcu_mark}"
         )
 
         self._update_tree_values(self._sample_buffers)

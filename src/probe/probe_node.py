@@ -323,14 +323,17 @@ class ProbeNode(Node):
     def _on_scan(self, event):
         try:
             probes = scan_probes()
-            self._last_probes = probes
-            self.publish(ProbeScanResult(probes=[
-                dict(name=p.name, vendor=p.vendor, uid=p.uid,
-                     target=p.target, board_name=p.board_name,
-                     protocol=p.debug_protocol) for p in probes
-            ]))
-        except Exception:
+        except Exception as e:
+            logger.error(f"探针扫描异常: {e}")
             self.publish(ProbeScanResult(probes=[]))
+            return
+
+        self._last_probes = probes
+        self.publish(ProbeScanResult(probes=[
+            dict(name=p.name, vendor=p.vendor, uid=p.uid,
+                 target=p.target, board_name=p.board_name,
+                 protocol=p.debug_protocol) for p in probes
+        ]))
 
     def _on_connect(self, event):
         if self._handle:
@@ -340,7 +343,12 @@ class ProbeNode(Node):
             self.publish(ProbeConnectionFailed(reason="请先扫描"))
             return
         try:
-            self._handle = connect_probe(probes[event.probe_index], swd_freq_hz=event.swd_freq_hz, mode=event.mode)
+            self._handle = connect_probe(
+                probes[event.probe_index],
+                swd_freq_hz=event.swd_freq_hz,
+                mode=event.mode,
+                target_override=event.target_override,
+            )
             self._session = self._handle.session
             self.publish(ProbeConnected(
                 target_name=self._handle.target_name,

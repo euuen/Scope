@@ -225,6 +225,49 @@ class ScopeNode(Node):
             QPushButton#presetBtn:hover {
                 background: #00b4d8; color: #0a0a18;
             }
+            QPushButton#resetBtn {
+                padding: 8px 20px; background: #4a2030;
+                border: 1px solid #8a3040; border-radius: 6px;
+                color: #ffc0c0; font-weight: bold;
+            }
+            QPushButton#resetBtn:hover {
+                background: #6a2c40; border: 1px solid #c84050;
+            }
+            QPushButton#resumeBtn {
+                padding: 8px 24px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #1a7840, stop:1 #14562e);
+                border: 1px solid #208848; border-radius: 6px;
+                color: #e0ffe0; font-weight: bold;
+            }
+            QPushButton#resumeBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #24a050, stop:1 #1a7840);
+            }
+            QPushButton#mcuRunBtn {
+                padding: 8px 18px; background: #26486a;
+                border: 1px solid #3068a0; border-radius: 6px;
+                color: #c0e0ff; font-weight: bold;
+            }
+            QPushButton#mcuRunBtn:hover {
+                background: #305880; border: 1px solid #4080c0;
+            }
+            QPushButton#mcuResumeBtn {
+                padding: 8px 18px; background: #1a5a40;
+                border: 1px solid #208858; border-radius: 6px;
+                color: #c0ffd0; font-weight: bold;
+            }
+            QPushButton#mcuResumeBtn:hover {
+                background: #207850; border: 1px solid #28a868;
+            }
+            QPushButton#clearPointsBtn {
+                padding: 8px 16px; background: #3a2a18;
+                border: 1px solid #8a6a30; border-radius: 6px;
+                color: #ffd080; font-weight: bold;
+            }
+            QPushButton#clearPointsBtn:hover {
+                background: #503820; border: 1px solid #b08840;
+            }
             QPushButton#exportBtn {
                 padding: 8px 20px; background: #262648;
                 border: 1px solid #363658; border-radius: 6px;

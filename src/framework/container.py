@@ -75,7 +75,7 @@ class Container:
                         await node._process()
                     else:
                         await asyncio.to_thread(node._process)
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.001)  # 1ms 让步，避免忙循环占用 CPU
 
         await self._bus.stop()
         # 不输出停止日志

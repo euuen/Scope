@@ -18,13 +18,15 @@ class ConnectionHandle:
 
 
 def connect_probe(probe: ProbeInfo, swd_freq_hz: int = 4_000_000,
-                  mode: str = "attach") -> ConnectionHandle:
+                  mode: str = "attach",
+                  target_override: str = "") -> ConnectionHandle:
     """连接到指定探针。
 
     Args:
         probe: 目标探针信息
         swd_freq_hz: SWD 频率 (Hz)
         mode: "attach" 或 "reset"（连接后复位目标）
+        target_override: 强制指定目标芯片型号，如 "stm32g0b1re"。留空则由 pyOCD 自动识别。
 
     Returns:
         ConnectionHandle
@@ -48,13 +50,22 @@ def connect_probe(probe: ProbeInfo, swd_freq_hz: int = 4_000_000,
         if target_probe is None:
             raise ConnectionError(f"未找到探针 {probe.name} (UID: {probe.uid})")
 
-        opts = {
+        opts: dict = {
             "frequency": swd_freq_hz,
             "connect_mode": "attach",
         }
+        # 用户指定了目标型号 → 传给 pyOCD 避免 auto-detect 失败
+        if target_override:
+            opts["target_override"] = target_override
+
         session = Session(probe=target_probe, options=opts)
         session.open()
         target = session.target
+
+        # 校验 MEM-AP 是否存在（参考 old mem_backend.py）
+        if not target or not target.aps:
+            session.close()
+            raise ConnectionError("未找到 MEM-AP（AHB-AP），请检查 SWD 接线和芯片供电")
 
         # reset + resume 模式
         if mode == "reset" and target:
@@ -64,7 +75,7 @@ def connect_probe(probe: ProbeInfo, swd_freq_hz: int = 4_000_000,
             except Exception as e:
                 logger.warning(f"复位后启动失败: {e}")
 
-        target_name = target.part_number if target else probe.target or "cortex_m"
+        target_name = target.part_number or target_override or probe.target or "cortex_m"
 
         logger.info(f"已连接 {probe.name} → {target_name} ({swd_freq_hz // 1000} kHz)")
         return ConnectionHandle(

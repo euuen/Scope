@@ -26,23 +26,21 @@ def scan_probes() -> list[ProbeInfo]:
     try:
         from pyocd.probe.aggregator import DebugProbeAggregator
     except ImportError:
-        logger.warning("pyOCD 未安装")
+        logger.warning("pyOCD 未安装，无法扫描探针")
         return []
 
     probes: list[ProbeInfo] = []
-    try:
-        all_probes = DebugProbeAggregator.get_all_connected_probes()
-        for p in all_probes:
-            try:
-                probes.append(ProbeInfo(
-                    name=p.product_name or p.vendor_name or "Unknown",
-                    vendor=p.vendor_name or "Unknown",
-                    uid=p.unique_id or "",
-                ))
-            except Exception:
-                continue
-        logger.info(f"扫描到 {len(probes)} 个探针")
-    except Exception as e:
-        logger.warning(f"扫描探针失败: {e}")
+    all_probes = DebugProbeAggregator.get_all_connected_probes()
+    for p in all_probes:
+        try:
+            probes.append(ProbeInfo(
+                name=p.product_name or p.vendor_name or "Unknown",
+                vendor=p.vendor_name or "Unknown",
+                uid=p.unique_id or "",
+            ))
+        except Exception as e:
+            logger.warning(f"跳过探针 {getattr(p, 'unique_id', '?' )}: {e}")
+            continue
 
+    logger.info(f"扫描到 {len(probes)} 个探针 (共 {len(all_probes)} 个原始接口)")
     return probes

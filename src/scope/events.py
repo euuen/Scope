@@ -28,10 +28,12 @@ class ConnectProbeRequest(Event):
         probe_index: 探针在列表中的索引
         mode: 连接模式 ("attach" / "reset")
         swd_freq_hz: SWD 时钟频率 (Hz)
+        target_override: 强制指定目标芯片型号，如 "stm32g0b1re"。留空则由 pyOCD 自动识别。
     """
     probe_index: int = 0
     mode: str = "attach"
     swd_freq_hz: int = 4000000
+    target_override: str = ""
 
 
 class DisconnectProbeRequest(Event):
@@ -86,6 +88,21 @@ class VariableWriteRequest(Event):
     """
     expression: str = ""
     value: float = 0.0
+
+
+class PauseMcuRequest(Event):
+    """暂停 MCU 运行。"""
+    pass
+
+
+class ResumeMcuRequest(Event):
+    """恢复 MCU 运行。"""
+    pass
+
+
+class ResetSamplingRequest(Event):
+    """全量复位：清空 MockDataNode 内部所有计数器和相位。"""
+    pass
 
 
 # ================================================================
@@ -175,7 +192,9 @@ class SamplingStatus(Event):
         is_running: 是否正在采样
         sample_count: 已采样本数
         actual_rate: 实际采样率 (Hz)
+        paused: MCU 是否暂停
     """
     is_running: bool = False
     sample_count: int = 0
     actual_rate: float = 0.0
+    paused: bool = False
